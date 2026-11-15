@@ -1,5 +1,9 @@
 import { hashBytes, hashCombine } from '../hash';
 import type { GeodesicMesh } from './geodesic';
+import { createGlobalClimate, type GlobalClimate } from '../systems/climate/global';
+import { generateSystem, type StarSystem } from '../universe/system';
+import { createBioState, type BioState } from '../systems/biosphere/bioState';
+import { createCivState, type CivState } from '../systems/society/civState';
 
 /**
  * Whole-world simulation state. Everything a system reads or writes lives in
@@ -50,12 +54,23 @@ export interface WorldFields {
   continentality: Float32Array;
   /** Index into the rule pack's biome list (255 = none). */
   biome: Uint8Array;
+  /** 0 wild, 1 farmland, 2 town, 3 ruins. */
+  landUse: Uint8Array;
+  /** Polity that holds the cell (-1 = none). */
+  territory: Int16Array;
+  /** People per km². */
+  population: Float32Array;
+  /** Animal species living in the cell's region. */
+  richness: Float32Array;
+  /** Magic field strength (0 without magic). */
+  mana: Float32Array;
 }
 
 export type FieldName = keyof WorldFields;
 export const FIELD_NAMES: readonly FieldName[] = [
   'elevation', 'plate', 'crustThickness', 'crustAge', 'relief', 'stress', 'flow',
   'tempMean', 'temperature', 'seasonAmp', 'moisture', 'continentality', 'biome',
+  'landUse', 'territory', 'population', 'richness', 'mana',
 ];
 
 export interface WorldState {
@@ -73,9 +88,70 @@ export interface WorldState {
   readonly fields: WorldFields;
   /** Bumped whenever a field is rewritten, so consumers can skip unchanged layers. */
   readonly versions: Record<FieldName, number>;
+  /** Star, planets and moons. */
+  readonly system: StarSystem;
+  /** Global energy balance, carbon and ice. */
+  readonly climate: GlobalClimate;
+  /** Everything worth telling, oldest first. */
+  readonly chronicle: ChronicleEntry[];
+  /** Species, populations and the history of life. */
+  readonly bio: BioState;
+  /** Settlements, nations, technology, culture. */
+  readonly civ: CivState;
+  /** Recent physical events (impacts, eruptions) for other systems and the UI. */
+  readonly events: WorldEvent[];
+  /** Temporary climate modifiers from spells (°C, moisture), decaying. */
+  readonly mods: ClimateMods;
+  readonly magic: { arcane: number };
 }
 
-export function createWorldState(mesh: GeodesicMesh, seed: number, plateCount: number): WorldState {
+export interface WorldEvent {
+  kind: 'impact' | 'lip' | 'eruption';
+  time: number;
+  cell: number;
+  magnitude: number;
+  handled?: boolean;
+}
+
+export interface ClimateMods {
+  temp: Float32Array;
+  moist: Float32Array;
+  /** Decay rate per year of the modifiers. */
+  decay: number;
+  dirty: boolean;
+  reliefDirty: boolean;
+}
+
+export interface WorldOptions {
+  tiltDeg?: number;
+  co2Ppm?: number;
+  maxSpecies?: number;
+}
+
+export type ChronicleKind = 'geo' | 'climate' | 'life' | 'civ' | 'war' | 'tech' | 'religion' | 'disaster' | 'space' | 'magic' | 'sky';
+
+export interface ChronicleEntry {
+  /** Running number (never reused, so the UI can ask for entries after one). */
+  seq: number;
+  time: number;
+  kind: ChronicleKind;
+  text: string;
+  cell?: number;
+  polity?: number;
+  species?: number;
+}
+
+/** Keep the chronicle bounded: old minor entries are dropped first. */
+export function chronicle(state: WorldState, kind: ChronicleKind, text: string, extra: Partial<ChronicleEntry> = {}): void {
+  const seq = (state.chronicle[state.chronicle.length - 1]?.seq ?? -1) + 1;
+  state.chronicle.push({ time: state.time, kind, text, ...extra, seq });
+  if (state.chronicle.length > 4000) state.chronicle.splice(0, 1000);
+}
+
+export function createWorldState(mesh: GeodesicMesh, seed: number, plateCount: number, opts: WorldOptions = {}): WorldState {
+  const tiltDeg = opts.tiltDeg ?? 23.44;
+  const co2Ppm = opts.co2Ppm ?? 280;
+  const system = generateSystem(seed);
   const n = mesh.count;
   const versions = Object.fromEntries(FIELD_NAMES.map((f) => [f, 0])) as Record<FieldName, number>;
   const alive = new Uint8Array(MAX_PLATES);
@@ -110,8 +186,21 @@ export function createWorldState(mesh: GeodesicMesh, seed: number, plateCount: n
       moisture: new Float32Array(n),
       continentality: new Float32Array(n),
       biome: new Uint8Array(n),
+      landUse: new Uint8Array(n),
+      territory: new Int16Array(n).fill(-1),
+      population: new Float32Array(n),
+      richness: new Float32Array(n),
+      mana: new Float32Array(n),
     },
     versions,
+    system,
+    climate: createGlobalClimate(system, tiltDeg, co2Ppm),
+    chronicle: [],
+    bio: createBioState(mesh.level, opts.maxSpecies ?? 150),
+    civ: createCivState(n),
+    events: [],
+    mods: { temp: new Float32Array(n), moist: new Float32Array(n), decay: 0, dirty: false, reliefDirty: false },
+    magic: { arcane: 1 },
   };
 }
 
@@ -136,5 +225,7 @@ export function hashWorld(state: WorldState): number {
   h = hashCombine(h, hashBytes(state.plates.omega));
   h = hashCombine(h, hashBytes(state.plates.drive));
   h = hashCombine(h, hashBytes(state.plates.pending));
+  h = hashCombine(h, hashBytes(new Float64Array([state.climate.co2Natural, state.climate.co2Excess, state.bio.stage, state.bio.nextId, state.bio.living.length, state.civ.nextId, state.civ.totalPop])));
+  h = hashCombine(h, hashBytes(state.bio.density));
   return h;
 }

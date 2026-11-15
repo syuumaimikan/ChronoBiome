@@ -77,7 +77,9 @@ export function oceanVolume(elevation: Float32Array, seaLevel: number): number {
 /** Find the sea level that holds the conserved water volume (bisection near the previous level). */
 export function solveSeaLevel(state: WorldState): number {
   const e = state.fields.elevation;
-  const V = state.waterVolume;
+  // Water locked in land ice beyond the starting ice sheets lowers the sea; melting raises it.
+  const g = state.climate;
+  const V = Math.max(0, state.waterVolume - (g.iceVolume0 >= 0 ? g.iceVolume - g.iceVolume0 : 0));
   // Volume grows with sea level: bracket around the previous level, widening if needed.
   let lo = state.seaLevel - 200;
   let hi = state.seaLevel + 200;

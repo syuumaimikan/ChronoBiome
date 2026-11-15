@@ -1,12 +1,21 @@
 import type { FieldName, WorldFields } from '../core/world/state';
-import type { WorldInfo } from '../worker/protocol';
+import type { TownBrief, WorldInfo } from '../worker/protocol';
 
 /**
  * Map layers: which fields a layer needs and how a cell value becomes a colour.
  * Colours are written straight into an RGB byte array (3 bytes per cell).
  */
 
-export type LayerId = 'biome' | 'elevation' | 'plates' | 'crust' | 'crustAge' | 'temperature' | 'tempMean' | 'moisture';
+export type LayerId =
+  | 'biome' | 'elevation' | 'plates' | 'crust' | 'crustAge' | 'temperature' | 'tempMean' | 'moisture'
+  | 'territory' | 'population' | 'landUse' | 'richness' | 'mana' | 'range';
+
+/** Extra data some layers paint from (not world fields). */
+export interface PaintContext {
+  /** Density of one species per cell (range layer). */
+  range: Float32Array | null;
+  towns: TownBrief[];
+}
 
 /** Drainage (cells of rain) above which a land cell is drawn as a river. */
 const RIVER_MIN_FLOW = 10;
@@ -36,9 +45,55 @@ export interface LayerDef {
   name: string;
   fields: FieldName[];
   /** Continuous legend (gradient) or categorical entries. */
-  legend: (world: WorldInfo, fields: Partial<WorldFields>, seaLevel: number) => { gradient?: string; stops: LegendStop[] };
-  paint: (out: Uint8Array, fields: Partial<WorldFields>, world: WorldInfo, seaLevel: number) => void;
+  legend: (world: WorldInfo, fields: Partial<WorldFields>, seaLevel: number, ctx: PaintContext) => { gradient?: string; stops: LegendStop[] };
+  paint: (out: Uint8Array, fields: Partial<WorldFields>, world: WorldInfo, seaLevel: number, ctx: PaintContext) => void;
+  /** Group in the layer picker. */
+  group?: 'nature' | 'people';
 }
+
+/** Muted relief underneath human/biological overlays. */
+function base(out: Uint8Array, e: Float32Array, sea: number): void {
+  for (let i = 0; i < e.length; i++) {
+    const o = i * 3;
+    if (e[i] < sea) { out[o] = 36; out[o + 1] = 52; out[o + 2] = 74; }
+    else {
+      const h = Math.min(1, (e[i] - sea) / 4000);
+      const g = 104 + 60 * h;
+      out[o] = g; out[o + 1] = g; out[o + 2] = g - 6;
+    }
+  }
+}
+
+function mix(out: Uint8Array, o: number, r: number, g: number, b: number, t: number): void {
+  out[o] += (r - out[o]) * t;
+  out[o + 1] += (g - out[o + 1]) * t;
+  out[o + 2] += (b - out[o + 2]) * t;
+}
+
+const POP: Stop[] = [
+  [0, 120, 120, 112],
+  [0.5, 220, 200, 120],
+  [5, 236, 150, 60],
+  [50, 214, 70, 50],
+  [500, 120, 20, 60],
+];
+const RICH: Stop[] = [
+  [0, 110, 110, 104],
+  [2, 140, 150, 110],
+  [6, 90, 170, 90],
+  [12, 30, 140, 90],
+  [20, 20, 90, 120],
+];
+const MANA: Stop[] = [
+  [0, 40, 40, 60],
+  [0.3, 70, 60, 140],
+  [0.7, 140, 90, 220],
+  [1.2, 220, 160, 250],
+  [2, 255, 240, 255],
+];
+const popRamp = ramp(POP);
+const richRamp = ramp(RICH);
+const manaRamp = ramp(MANA);
 
 type Stop = [number, number, number, number]; // value, r, g, b
 
@@ -288,6 +343,139 @@ export const LAYERS: LayerDef[] = [
       for (let i = 0; i < m.length; i++) {
         if (e[i] < sea) { out[i * 3] = 52; out[i * 3 + 1] = 70; out[i * 3 + 2] = 96; }
         else moistRamp(m[i], out, i * 3);
+      }
+    },
+  },
+  {
+    id: 'territory',
+    name: '国と領土',
+    group: 'people',
+    fields: ['territory', 'elevation', 'landUse'],
+    legend: (_w, _f, _s, ctx) => {
+      const seen = new Map<number, { color: string; name: string; pop: number }>();
+      for (const t of ctx.towns) {
+        const p = seen.get(t.polity);
+        if (p) p.pop += t.pop;
+        else if (t.polity >= 0) seen.set(t.polity, { color: t.color, name: t.capital ? t.name : '', pop: t.pop });
+      }
+      const list = [...seen.values()].sort((a, b) => b.pop - a.pop).slice(0, 8);
+      return {
+        stops: list.length
+          ? [...list.map((p) => ({ color: p.color, label: p.name ? `${p.name}の国` : '国' })), { color: 'rgb(60,40,30)', label: '遺跡' }]
+          : [{ color: 'transparent', label: 'まだ国はない' }],
+      };
+    },
+    paint: (out, f, _w, sea, ctx) => {
+      base(out, f.elevation!, sea);
+      const col = new Map<number, [number, number, number]>();
+      for (const t of ctx.towns) if (!col.has(t.polity)) col.set(t.polity, hexToRgb(t.color));
+      const T = f.territory!;
+      const U = f.landUse!;
+      for (let i = 0; i < T.length; i++) {
+        const o = i * 3;
+        if (U[i] === 3) mix(out, o, 60, 40, 30, 0.7);
+        const c = T[i] >= 0 ? col.get(T[i]) : undefined;
+        if (!c) continue;
+        mix(out, o, c[0], c[1], c[2], U[i] === 2 ? 0.95 : 0.62);
+        if (U[i] === 2) { out[o] = Math.min(255, out[o] + 40); out[o + 1] = Math.min(255, out[o + 1] + 40); out[o + 2] = Math.min(255, out[o + 2] + 40); }
+      }
+    },
+  },
+  {
+    id: 'population',
+    name: '人口密度',
+    group: 'people',
+    fields: ['population', 'elevation'],
+    legend: () => ({
+      gradient: gradient(POP),
+      stops: [{ color: css(POP[0]), label: '0' }, { color: css(POP[2]), label: '5 人/km²' }, { color: css(POP[4]), label: '500 人/km²' }],
+    }),
+    paint: (out, f, _w, sea) => {
+      base(out, f.elevation!, sea);
+      const P = f.population!;
+      const tmp = new Uint8Array(3);
+      for (let i = 0; i < P.length; i++) {
+        if (P[i] <= 0.01) continue;
+        const o = i * 3;
+        popRamp(P[i], tmp, 0);
+        mix(out, o, tmp[0], tmp[1], tmp[2], Math.min(0.95, 0.45 + 0.15 * Math.log10(1 + P[i] * 10)));
+      }
+    },
+  },
+  {
+    id: 'landUse',
+    name: '土地利用',
+    group: 'people',
+    fields: ['landUse', 'biome', 'elevation', 'flow'],
+    legend: () => ({
+      stops: [
+        { color: 'rgb(222,196,96)', label: '農地' },
+        { color: 'rgb(230,90,70)', label: '市街地' },
+        { color: 'rgb(70,50,40)', label: '遺跡' },
+        { color: 'rgb(120,140,110)', label: '自然' },
+      ],
+    }),
+    paint: (out, f, world, sea) => {
+      const cols = world.biomes.map((b) => hexToRgb(b.color));
+      const B = f.biome!;
+      const U = f.landUse!;
+      for (let i = 0; i < B.length; i++) {
+        const c = cols[B[i]] ?? [128, 128, 128];
+        const o = i * 3;
+        // Wild land is drawn desaturated so human marks stand out.
+        const g = (c[0] + c[1] + c[2]) / 3;
+        out[o] = (c[0] + g) / 2; out[o + 1] = (c[1] + g) / 2; out[o + 2] = (c[2] + g) / 2;
+        if (U[i] === 1) mix(out, o, 222, 196, 96, 0.85);
+        else if (U[i] === 2) mix(out, o, 230, 90, 70, 0.95);
+        else if (U[i] === 3) mix(out, o, 70, 50, 40, 0.85);
+      }
+      paintRivers(out, f.flow!, f.elevation!, sea);
+    },
+  },
+  {
+    id: 'richness',
+    name: '種の多様性',
+    fields: ['richness', 'elevation'],
+    legend: () => ({
+      gradient: gradient(RICH),
+      stops: [{ color: css(RICH[0]), label: '0 種' }, { color: css(RICH[2]), label: '6' }, { color: css(RICH[4]), label: '20 種+' }],
+    }),
+    paint: (out, f) => {
+      const R = f.richness!;
+      for (let i = 0; i < R.length; i++) richRamp(R[i], out, i * 3);
+    },
+  },
+  {
+    id: 'mana',
+    name: 'マナ濃度',
+    fields: ['mana'],
+    legend: () => ({
+      gradient: gradient(MANA),
+      stops: [{ color: css(MANA[0]), label: '枯渇' }, { color: css(MANA[2]), label: '平常' }, { color: css(MANA[4]), label: '霊脈' }],
+    }),
+    paint: (out, f) => {
+      const M = f.mana!;
+      for (let i = 0; i < M.length; i++) manaRamp(M[i], out, i * 3);
+    },
+  },
+  {
+    id: 'range',
+    name: '種の分布',
+    fields: ['elevation'],
+    legend: (_w, _f, _s, ctx) => ({
+      stops: ctx.range ? [{ color: 'rgb(250,210,60)', label: '多い' }, { color: 'rgb(160,120,40)', label: '少ない' }] : [{ color: 'transparent', label: '生物の詳細から「分布を見る」' }],
+    }),
+    paint: (out, f, _w, sea, ctx) => {
+      base(out, f.elevation!, sea);
+      const D = ctx.range;
+      if (!D) return;
+      let mx = 0;
+      for (let i = 0; i < D.length; i++) mx = Math.max(mx, D[i]);
+      if (mx <= 0) return;
+      for (let i = 0; i < D.length; i++) {
+        if (D[i] <= 0) continue;
+        const t = Math.sqrt(D[i] / mx);
+        mix(out, i * 3, 160 + 90 * t, 120 + 90 * t, 40 + 20 * t, 0.55 + 0.4 * t);
       }
     },
   },

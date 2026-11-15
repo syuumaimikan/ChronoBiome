@@ -79,6 +79,11 @@ function perimeter(): number[] {
 const PERIMETER = perimeter();
 
 const ROCK = [0.49, 0.47, 0.44];
+const BARREN = [0.46, 0.41, 0.37];
+const FIELD_A = [0.78, 0.68, 0.36];
+const FIELD_B = [0.5, 0.6, 0.28];
+const FIELD_C = [0.55, 0.44, 0.3];
+const TOWN_GROUND = [0.56, 0.52, 0.46];
 const SNOW = [0.93, 0.95, 0.97];
 const SAND = [0.85, 0.79, 0.6];
 const SEABED_SHALLOW = [0.76, 0.7, 0.52];
@@ -105,6 +110,8 @@ export class SurfaceTerrain {
   private sampler: SurfaceSampler | null = null;
   private looks: BiomeLook[] = [];
   private cellRgb: Uint8Array | null = null;
+  private landUse: Uint8Array | null = null;
+  private vegScale = 1;
   private veg: VegContext | null = null;
   private colorNoise = new Noise3(77);
   private readonly sample = newSample();
@@ -154,13 +161,19 @@ export class SurfaceTerrain {
     this.vegMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   }
 
-  /** New world data: every chunk is rebuilt (stale ones stay visible meanwhile). */
-  setData(sampler: SurfaceSampler, looks: BiomeLook[], seed: number, cellRgb: Uint8Array | null): void {
+  /**
+   * New world data: every chunk is rebuilt (stale ones stay visible meanwhile).
+   * `vegScale` is how far plants have covered the land (0 before land plants),
+   * `landUse` marks fields, towns and ruins.
+   */
+  setData(sampler: SurfaceSampler, looks: BiomeLook[], seed: number, cellRgb: Uint8Array | null, landUse: Uint8Array | null = null, vegScale = 1): void {
     const first = !this.sampler || this.sampler.radiusM !== sampler.radiusM;
     this.sampler = sampler;
     this.looks = looks;
     this.cellRgb = cellRgb;
-    this.veg = makeVegContext(seed, looks);
+    this.landUse = landUse;
+    this.vegScale = Math.max(0, Math.min(1, vegScale));
+    this.veg = makeVegContext(seed, looks, this.vegScale, landUse);
     this.colorNoise = new Noise3((seed ^ 0x1234567) >>> 0);
     this.uniforms.uRadius.value = sampler.radiusM;
     this.version++;
@@ -404,7 +417,7 @@ export class SurfaceTerrain {
     // Children 2 and 3: trees and boulders, grass (placeholders keep the indices fixed).
     const veg = c.level >= VEG_MIN_LEVEL && this.veg && maxH > sea
       ? buildVegetation(
-        { face: c.face, level: c.level, x: c.x, y: c.y, n, heights, dirs, biome, temp, slope, center: [cx, cy, cz], radiusM: R, seaLevel: sea },
+        { face: c.face, level: c.level, x: c.x, y: c.y, n, heights, dirs, biome, temp, slope, center: [cx, cy, cz], radiusM: R, seaLevel: sea, cells },
         this.veg,
       )
       : null;
@@ -480,6 +493,21 @@ export class SurfaceTerrain {
       const look = this.looks[biome];
       const gc = look ? look.ground : [0.5, 0.5, 0.4];
       r = gc[0]; g = gc[1]; b = gc[2];
+      // Before plants covered the land it is bare rock and gravel.
+      const bare = 1 - this.vegScale;
+      if (bare > 0) {
+        r += (BARREN[0] - r) * bare; g += (BARREN[1] - g) * bare; b += (BARREN[2] - b) * bare;
+      }
+      // People: fields in strips of crops and fallow, packed earth and roofs in towns.
+      const lu = this.landUse ? this.landUse[cell] : 0;
+      if (lu === 1 || lu === 2) {
+        const R = this.sampler!.radiusM;
+        const k = R / 160;
+        const stripe = this.colorNoise.sample(dirs[v * 3] * k, dirs[v * 3 + 1] * k * 0.3, dirs[v * 3 + 2] * k);
+        const f = lu === 1 ? (stripe > 0.15 ? FIELD_A : stripe < -0.2 ? FIELD_C : FIELD_B) : TOWN_GROUND;
+        const t = lu === 1 ? 0.75 : 0.85;
+        r += (f[0] - r) * t; g += (f[1] - g) * t; b += (f[2] - b) * t;
+      }
       // Bare rock on steep slopes.
       const rock = smooth(0.5, 1.0, slope);
       r += (ROCK[0] - r) * rock; g += (ROCK[1] - g) * rock; b += (ROCK[2] - b) * rock;

@@ -9,6 +9,7 @@ import { resolveLooks } from '../src/render/surface/looks';
 import { newSample, SurfaceSampler } from '../src/render/surface/sampler';
 import { MAX_LEVEL, SurfaceTerrain } from '../src/render/surface/terrain';
 import { tangentFrame } from '../src/render/surface/vegetation';
+import type { SpeciesBrief } from '../src/worker/protocol';
 
 function makeWorld(seed = 4242) {
   const r = parseRulePack(structuredClone(earthLikePack));
@@ -196,15 +197,43 @@ describe('close-up terrain', { timeout: 120_000 }, () => {
     const l = Math.hypot(d[0], d[1], d[2]);
     for (let i = 0; i < 3; i++) d[i] /= l;
     const h = w.sampler.heightAt(d[0], d[1], d[2], 0);
+    // Animals come from the species living there; a grazer herd stands in for them.
+    const grazer: SpeciesBrief = {
+      id: 1, name: 'テストジカ', sci: 'Testus cervus', clade: 'mammal', plan: 'grazer', massKg: 120, diet: 0, habitat: 0, flight: false,
+      hue: 0.3, shade: 0.5, pattern: 0.2, horn: 0.6, tail: 0.3, density: 4, sapient: false,
+    };
     const counts: number[] = [];
     for (let run = 0; run < 2; run++) {
       const f = new Fauna();
-      f.setWorld(w.sampler, w.looks, w.sim.state.seed);
+      f.setWorld(w.sampler, w.sim.state.seed);
+      f.setSpecies([grazer, { ...grazer, id: 2, sapient: true }, { ...grazer, id: 3, plan: 'aquatic' }]);
       f.update(0.016, 0, d, h, true);
       counts.push(f.count);
       f.dispose();
     }
     expect(counts[0]).toBeGreaterThan(0);
     expect(counts[1]).toBe(counts[0]);
+
+    // Clicking an animal on screen picks its species (and nothing in empty sky).
+    const f = new Fauna();
+    f.setWorld(w.sampler, w.sim.state.seed);
+    f.setSpecies([grazer]);
+    f.update(0.016, 0, d, h, true);
+    const kinds = (f as unknown as { kinds: Map<number, { members: { dir: Float64Array | number[]; height: number }[]; size: number }> }).kinds;
+    const herd = kinds.get(1)!;
+    const a = herd.members[0];
+    const R = w.sampler.radiusM;
+    const target = new THREE.Vector3(a.dir[0], a.dir[1], a.dir[2]).multiplyScalar(R + a.height + herd.size * 0.5);
+    const up = target.clone().normalize();
+    const cam = new THREE.PerspectiveCamera(60, 16 / 9, 0.5, 1e7);
+    cam.position.copy(target).addScaledVector(up, 25).addScaledVector(new THREE.Vector3(1, 0, 0).cross(up).normalize(), 25);
+    cam.up.copy(up);
+    cam.lookAt(target);
+    cam.updateMatrixWorld();
+    expect(f.pick(cam, 0, 0, 1600, 900)).toBe(1);
+    cam.lookAt(target.clone().addScaledVector(up, 400));
+    cam.updateMatrixWorld();
+    expect(f.pick(cam, 0, 0, 1600, 900)).toBe(-1);
+    f.dispose();
   });
 });

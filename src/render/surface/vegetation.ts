@@ -37,16 +37,29 @@ export interface VegChunk {
   center: [number, number, number];
   radiusM: number;
   seaLevel: number;
+  /** Simulation cell of each vertex (for land use). */
+  cells?: Int32Array;
 }
 
 export interface VegContext {
   seed: number;
   looks: BiomeLook[];
   patch: Noise3;
+  /** 0 = bare rock (before land plants) … 1 = full cover. */
+  vegScale: number;
+  /** Per-cell land use (0 wild, 1 farmland, 2 town, 3 ruins). */
+  landUse: Uint8Array | null;
 }
 
-export function makeVegContext(seed: number, looks: BiomeLook[]): VegContext {
-  return { seed, looks, patch: new Noise3((seed ^ 0x7a3b11) >>> 0) };
+export function makeVegContext(seed: number, looks: BiomeLook[], vegScale = 1, landUse: Uint8Array | null = null): VegContext {
+  return { seed, looks, patch: new Noise3((seed ^ 0x7a3b11) >>> 0), vegScale, landUse };
+}
+
+/** Trees left standing by people: few in towns, some along field edges, ruins overgrown. */
+function humanFactor(ch: VegChunk, ctx: VegContext, vi: number): number {
+  if (!ctx.landUse || !ch.cells) return 1;
+  const lu = ctx.landUse[ch.cells[vi]];
+  return lu === 2 ? 0.05 : lu === 1 ? 0.18 : lu === 3 ? 0.8 : 1;
 }
 
 /** Share of candidates drawn at each level (rank threshold). */
@@ -183,6 +196,7 @@ function buildPlants(ch: VegChunk, ctx: VegContext): VegMesh | null {
       }
       const cold = kind === 'shrub' ? -9 : -2.5;
       const slopeOk = 1 - smooth(0.55, 1.0, slope);
+      density *= ctx.vegScale * humanFactor(ch, ctx, vi);
       const pTree = density * (0.2 + 0.8 * smooth(0.25, 0.75, patch)) * slopeOk * (temp > cold ? 1 : 0);
       tangentFrame(tmpUp, tmpE, tmpN, stream.next() * Math.PI * 2);
 
@@ -228,7 +242,8 @@ function addGrass(ch: VegChunk, ctx: VegContext, sink: Sink): void {
       const look = ctx.looks[ch.biome[vi]];
       if (!look) continue;
       const temp = ch.temp[vi];
-      const grass = look.auto ? autoVegetation(temp, 0.5).grass : look.grass;
+      const lu = ctx.landUse && ch.cells ? ctx.landUse[ch.cells[vi]] : 0;
+      const grass = (look.auto ? autoVegetation(temp, 0.5).grass : look.grass) * Math.min(1, ctx.vegScale * 1.3) * (lu === 2 ? 0.3 : 1);
       if (grass <= 0 || temp < -5) continue;
       const slopeOk = 1 - smooth(0.5, 0.95, ch.slope[vi]);
       if (stream.next() >= grass * 0.75 * slopeOk) continue;

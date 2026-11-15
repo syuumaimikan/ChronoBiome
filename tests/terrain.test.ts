@@ -53,8 +53,10 @@ describe('plate tectonics over deep time', { timeout: 120_000 }, () => {
   });
 
   it('conserves ocean water through sea-level changes', () => {
-    const { fields, seaLevel, waterVolume } = sim.state;
-    expect(oceanVolume(fields.elevation, seaLevel) / waterVolume).toBeCloseTo(1, 3);
+    const { fields, seaLevel, waterVolume, climate } = sim.state;
+    // Water locked in ice sheets beyond the initial ones is missing from the sea.
+    const locked = climate.iceVolume - climate.iceVolume0;
+    expect(oceanVolume(fields.elevation, seaLevel) / (waterVolume - locked)).toBeCloseTo(1, 3);
     expect(Math.abs(seaLevel)).toBeLessThan(1500);
   });
 

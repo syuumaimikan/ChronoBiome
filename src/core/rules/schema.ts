@@ -153,6 +153,82 @@ export const RulePackSchema = z
       rainShadowStartM: z.number().min(0).default(800),
     }),
     biomes: z.array(BiomeSchema).min(1).max(250),
+    /** Carbon cycle (milestone 3). */
+    carbon: z
+      .strictObject({
+        /** Starting CO2, ppm (pre-industrial Earth ≈ 280). */
+        co2Ppm: z.number().min(10).max(100_000).default(280),
+        /** Ice-sheet water equivalent per frozen land cell (m), for sea-level change. */
+        iceSheetM: z.number().min(0).default(1800),
+      })
+      .prefault({}),
+    /** Life and evolution (milestones 4–5). Mean waiting times in Myr between the great transitions. */
+    life: z
+      .strictObject({
+        enabled: z.boolean().default(true),
+        abiogenesisMyr: z.number().positive().default(600),
+        photosynthesisMyr: z.number().positive().default(700),
+        eukaryotesMyr: z.number().positive().default(1300),
+        multicellularMyr: z.number().positive().default(900),
+        animalsMyr: z.number().positive().default(350),
+        landPlantsMyr: z.number().positive().default(80),
+        landAnimalsMyr: z.number().positive().default(60),
+        /** Mean time between speciations of one lineage (Myr). */
+        speciationMyr: z.number().positive().default(2.5),
+        /** Mean lifetime of a species before background extinction (Myr). */
+        extinctionMyr: z.number().positive().default(7),
+        /** Living species tracked at once (diversification slows near it). */
+        maxSpecies: z.number().int().min(8).max(240).default(150),
+        /** Intelligence (0..1) at which a lineage becomes sapient and civilisation begins. */
+        sapienceThreshold: z.number().min(0.3).max(1).default(0.9),
+        /** Upward drift of intelligence per speciation in social, omnivorous warm-blooded lineages. */
+        intelligenceDrift: z.number().min(0).max(0.5).default(0.022),
+        /** Mean time between large asteroid impacts (Myr). */
+        impactEveryMyr: z.number().positive().default(110),
+      })
+      .prefault({}),
+    /** Settlements, economy, technology, buildings, nations, culture (milestones 6–7.5). */
+    civilization: z
+      .strictObject({
+        enabled: z.boolean().default(true),
+        /** Multiplier on research speed. */
+        researchRate: z.number().min(0).max(100).default(1),
+        /** Multiplier on population growth. */
+        growthRate: z.number().min(0).max(10).default(1),
+        /** Multiplier on the willingness to go to war. */
+        aggression: z.number().min(0).max(10).default(1),
+        maxSettlements: z.number().int().min(4).max(400).default(200),
+        /** CO2 emitted per person per year at full fossil-fuel use (ppm; Earth ≈ 3e-10). */
+        emissionPerCapitaPpm: z.number().min(0).default(3e-10),
+        /** Pathogens jump from animals to people at this rate multiplier. */
+        plagueRate: z.number().min(0).max(10).default(1),
+        spaceAge: z.boolean().default(true),
+      })
+      .prefault({}),
+    /** Magic (milestone 8). Disabled by default: the Earth-like pack is pure realism. */
+    magic: z
+      .strictObject({
+        enabled: z.boolean().default(false),
+        /** Elements spells can be made of. */
+        elements: z.array(z.string().min(1)).min(1).max(12).default(['火', '水', '地', '風', '生命', '精神', '時空']),
+        /** Mana welling up at plate boundaries, volcanoes and old forests (per year, field units). */
+        sourceRate: z.number().min(0).default(0.02),
+        /** Share of the field that dissipates per year. */
+        decayPerYear: z.number().min(0).max(1).default(0.01),
+        /** Spell power per unit of mana. */
+        potency: z.number().positive().default(1),
+      })
+      .prefault({}),
+    /** Astrology (milestone 9): cultural always, arcane (affecting mana) only with magic. */
+    astrology: z
+      .strictObject({
+        enabled: z.boolean().default(true),
+        /** Planetary aspects change mana and spell strength (needs magic). */
+        arcane: z.boolean().default(false),
+        /** Orb (degrees) within which an aspect counts. */
+        orbDeg: z.number().min(0.5).max(15).default(6),
+      })
+      .prefault({}),
   })
   .superRefine((pack, ctx) => {
     const seen = new Set<string>();

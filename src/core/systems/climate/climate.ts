@@ -2,12 +2,13 @@ import { compileExpr, ExprScope, type Evaluator } from '../../rules/expr';
 import { BIOME_VARIABLES, type RulePack } from '../../rules/schema';
 import { hopDistance, smoothField, type Topology } from '../../world/topology';
 import { touch, type WorldState } from '../../world/state';
+import { anomalyAt } from './global';
 
 /**
- * First-order climate (milestone 1): temperature from latitude, altitude and
- * the seasonal cycle; moisture from latitude bands (Hadley/Ferrel/polar
- * cells), distance to the sea along the prevailing wind, and rain shadows.
- * Milestone 3 replaces the temperature part with an energy-balance model.
+ * Regional climate: temperature from latitude, altitude and the seasonal cycle,
+ * shifted by the global energy-balance anomaly (global.ts); moisture from
+ * latitude bands (Hadley/Ferrel/polar cells), distance to the sea along the
+ * prevailing wind, and rain shadows; warmer air carries more rain.
  */
 
 const DEG = Math.PI / 180;
@@ -28,14 +29,14 @@ export function computeClimateStatic(state: WorldState, rules: RulePack, scratch
     fields.continentality[i] = isOcean(i) ? 0 : 1 - Math.exp(-km / C.oceanInfluenceKm);
   }
 
-  // ---- annual mean temperature and seasonal amplitude
-  const tiltScale = Math.min(2.5, Math.sin(C.axialTiltDeg * DEG) / Math.sin(23.44 * DEG));
+  // ---- baseline annual mean temperature (before the global anomaly) and seasonal amplitude
+  const tiltScale = Math.min(2.5, Math.sin(state.climate.tiltDeg * DEG) / Math.sin(23.44 * DEG));
   for (let i = 0; i < n; i++) {
     const lat = mesh.lat[i];
     const absLat = Math.abs(lat);
     const t0 = C.poleTempC + (C.equatorTempC - C.poleTempC) * Math.cos(lat);
     const alt = Math.max(0, e[i] - sea);
-    fields.tempMean[i] = t0 - (C.lapseRateCPerKm * alt) / 1000;
+    scratch.base[i] = t0 - (C.lapseRateCPerKm * alt) / 1000;
     const cont = fields.continentality[i];
     fields.seasonAmp[i] = 0.5 * C.maxSeasonalSwingC * tiltScale * Math.pow(Math.sin(absLat), 0.8) * (0.15 + 0.85 * cont);
   }
@@ -72,8 +73,40 @@ export function computeClimateStatic(state: WorldState, rules: RulePack, scratch
   }
   smoothField(mesh, m, 2, 0.5, scratch.b);
   for (let i = 0; i < n; i++) if (isOcean(i)) m[i] = 1;
+  scratch.moist.set(m);
 
-  touch(state, 'continentality', 'tempMean', 'seasonAmp', 'moisture');
+  touch(state, 'continentality', 'seasonAmp', 'moisture');
+  applyTemperature(state, rules, scratch);
+}
+
+/**
+ * Write temperatures (baseline + global anomaly) and what follows from them:
+ * rain (≈ 7 % more per °C of warming, Clausius–Clapeyron), biomes and the
+ * land ice that locks up sea water.
+ */
+export function applyTemperature(state: WorldState, rules: RulePack, scratch: ClimateScratch): void {
+  const { mesh, fields } = state;
+  const n = mesh.count;
+  const e = fields.elevation;
+  const sea = state.seaLevel;
+  const g = state.climate;
+  const wet = Math.max(0.6, Math.min(1.4, 1 + 0.03 * g.meanAnomaly));
+  const mt = state.mods.temp, mm = state.mods.moist;
+  let ice = 0, land = 0;
+  for (let i = 0; i < n; i++) {
+    const t = scratch.base[i] + anomalyAt(g, mesh.lat[i]) + mt[i];
+    fields.tempMean[i] = t;
+    if (e[i] >= sea) {
+      fields.moisture[i] = Math.max(0, Math.min(1, scratch.moist[i] * wet + mm[i]));
+      land++;
+      if (t < -8) ice++;
+    }
+  }
+  // Ice sheets ≈ 2 km thick (as water: ×0.9), counted in ocean-volume units.
+  g.iceVolume = ice * rules.carbon.iceSheetM;
+  if (g.iceVolume0 < 0) g.iceVolume0 = g.iceVolume;
+  g.iceShare = land > 0 ? ice / land : 0;
+  touch(state, 'tempMean', 'moisture');
   classifyBiomes(state, rules);
 }
 
@@ -184,8 +217,13 @@ export function classifyBiomes(state: WorldState, rules: RulePack): void {
 export class ClimateScratch {
   readonly a: Float32Array;
   readonly b: Float32Array;
+  /** Baseline temperature (rule pack profile + altitude) and moisture before the global anomaly. */
+  readonly base: Float32Array;
+  readonly moist: Float32Array;
   constructor(n: number) {
     this.a = new Float32Array(n);
     this.b = new Float32Array(n);
+    this.base = new Float32Array(n);
+    this.moist = new Float32Array(n);
   }
 }

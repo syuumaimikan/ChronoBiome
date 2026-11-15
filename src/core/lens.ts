@@ -3,6 +3,7 @@
  * tick represents (and therefore which approximations each system uses).
  */
 export const LENSES = [
+  { id: 'auto', name: '自動', dtYears: NaN, note: '世界の段階に合わせて自動で切り替え（生命誕生前 1000万年 → 動物の時代 100万年 → 先史 200年 → 文明 1〜20年）' },
   { id: 'cosmic', name: '宇宙', dtYears: 1e7, note: '恒星進化・軌道の長期変動' },
   { id: 'geologic', name: '地質', dtYears: 1e6, note: 'プレート・侵食・炭素循環' },
   { id: 'evolution', name: '進化', dtYears: 1e4, note: '氷期・種分化' },

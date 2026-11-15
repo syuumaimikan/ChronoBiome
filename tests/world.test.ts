@@ -111,7 +111,10 @@ describe('first-order climate is Earth-like', () => {
       if (lat < 10) { eq += fields.tempMean[i]; eqN++; }
       if (lat > 75) { po += fields.tempMean[i]; poN++; }
     }
-    expect(eq / eqN - po / poN).toBeGreaterThan(35);
+    // Over the ocean: Earth today is ≈ 28 → −2 °C. At genesis the young star is
+    // fainter (≈ −4 °C globally), and the gradient stays about 30 °C.
+    expect(eq / eqN - po / poN).toBeGreaterThan(28);
+    expect(eq / eqN).toBeGreaterThan(po / poN + 20);
   });
 
   it('cools with altitude at the lapse rate', () => {

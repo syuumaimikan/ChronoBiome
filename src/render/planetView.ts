@@ -1,6 +1,7 @@
 import * as THREE from 'three';
-import type { MeshPayload } from '../worker/protocol';
+import type { MeshPayload, SpeciesBrief, TownBrief } from '../worker/protocol';
 import { Explorer, type ExploreMode, type ExploreStatus } from './explorer';
+import { Towns } from './towns';
 import { Avatar } from './surface/avatar';
 import { Fauna } from './surface/fauna';
 import type { BiomeLook } from './surface/looks';
@@ -59,7 +60,11 @@ export class PlanetView {
   private readonly sky = new Sky();
   private readonly terrain = new SurfaceTerrain();
   private readonly fauna = new Fauna();
+  private readonly towns = new Towns();
   private readonly avatar = new Avatar();
+  /** Called when an animal (species id) or a town (settlement id) is clicked. */
+  onPickAnimal?: (species: number) => void;
+  onPickTown?: (settlement: number) => void;
   private sampler: SurfaceSampler | null = null;
   private readonly probe = newSample();
 
@@ -115,6 +120,8 @@ export class PlanetView {
     this.scene.add(this.globe);
     this.scene.add(this.terrain.group);
     this.scene.add(this.fauna.group);
+    this.globe.add(this.towns.globeGroup);
+    this.scene.add(this.towns.sceneGroup);
     this.avatar.root.visible = false;
     this.scene.add(this.avatar.root);
     this.setScale(6.371e6);
@@ -143,6 +150,7 @@ export class PlanetView {
     if (this.explorer.mode === 'walk') this.explorer.exitWalk();
     this.terrain.reset();
     this.fauna.clear();
+    this.towns.setMesh(mesh);
 
     const n = mesh.count;
     const ringLen = mesh.ring.length;
@@ -191,17 +199,68 @@ export class PlanetView {
     this.setMarker(-1);
   }
 
-  /** Continuous surface for the close-up view; `cellRgb` paints a data layer instead of natural colours. */
-  setSurface(sampler: SurfaceSampler, looks: BiomeLook[], seed: number, cellRgb: Uint8Array | null): void {
+  /**
+   * Continuous surface for the close-up view; `cellRgb` paints a data layer
+   * instead of natural colours, `landUse` draws fields and towns, `vegScale`
+   * is how far plants cover the land (0 before land plants).
+   */
+  setSurface(sampler: SurfaceSampler, looks: BiomeLook[], seed: number, cellRgb: Uint8Array | null, landUse: Uint8Array | null = null, vegScale = 1): void {
     this.sampler = sampler;
     this.explorer.sampler = sampler;
-    this.terrain.setData(sampler, looks, seed, cellRgb);
-    this.fauna.setWorld(sampler, looks, seed);
+    this.terrain.setData(sampler, looks, seed, cellRgb, landUse, vegScale);
+    this.fauna.setWorld(sampler, seed);
+    this.towns.surfaceChanged(sampler);
     this.dirty = true;
   }
 
   get hasSurface(): boolean {
     return this.sampler !== null;
+  }
+
+  /** Settlements and trade routes. */
+  setTowns(towns: TownBrief[], links: [number, number, number, number][]): void {
+    this.towns.set(towns, links);
+    this.dirty = true;
+  }
+
+  /** Species living around the observer, for the animals on the ground. */
+  setFaunaSpecies(list: SpeciesBrief[]): void {
+    this.fauna.setSpecies(list);
+  }
+
+  /** True when the camera is low enough that animals are (about to be) drawn. */
+  get wantsFauna(): boolean {
+    const alt = this.camera.position.length() - this.explorer.radiusM - Math.max(0, this.sampler?.seaLevel ?? 0);
+    return this.surfaceOn && alt < FAUNA_ALT * 4;
+  }
+
+  /** Click on an animal or a town: report it and return true; otherwise false. */
+  pickObject(clientX: number, clientY: number): boolean {
+    const rect = this.canvas.getBoundingClientRect();
+    const nx = ((clientX - rect.left) / rect.width) * 2 - 1, ny = -((clientY - rect.top) / rect.height) * 2 + 1;
+    this.camera.updateMatrixWorld();
+    const sp = this.fauna.pick(this.camera, nx, ny, rect.width, rect.height);
+    if (sp >= 0) {
+      this.onPickAnimal?.(sp);
+      return true;
+    }
+    const ground = this.explorer.rayToSurface(clientX, clientY);
+    const town = this.towns.pick(this.camera, nx, ny, rect.width, rect.height, ground);
+    if (town >= 0) {
+      this.onPickTown?.(town);
+      return true;
+    }
+    return false;
+  }
+
+  /** Fly the camera to a cell (keeping a view of its surroundings). */
+  flyTo(cell: number): void {
+    const m = this.mesh;
+    if (!m || cell < 0) return;
+    const d = new Float64Array([m.pos[cell * 3], m.pos[cell * 3 + 1], m.pos[cell * 3 + 2]]);
+    const alt = this.camera.position.length() - this.explorer.radiusM;
+    this.explorer.flyToDir(d, Math.max(25_000, Math.min(alt, 1_500_000)));
+    this.dirty = true;
   }
 
   /** Diagnostics for development. */
@@ -464,6 +523,7 @@ export class PlanetView {
     const faunaOn = this.surfaceOn && alt < FAUNA_ALT && exg < 1.01;
     const obsH = ex.mode === 'walk' ? ex.playerH : this.sampler ? this.sampler.heightAt(obs[0], obs[1], obs[2], 2) : 0;
     this.fauna.update(dt, now / 1000, obs, obsH, faunaOn);
+    this.towns.update(this.camera, obs, alt, dt);
     const walking = ex.mode === 'walk';
     this.avatar.root.visible = walking && ex.camDist >= 1.2;
     if (walking) {
@@ -503,6 +563,7 @@ export class PlanetView {
     this.explorer.dispose();
     this.terrain.dispose();
     this.fauna.dispose();
+    this.towns.dispose();
     this.avatar.dispose();
     this.renderer.dispose();
   }

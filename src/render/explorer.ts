@@ -40,6 +40,17 @@ const GRAVITY = 22;
 const JUMP = 7.5;
 const EYE = 1.62;
 
+/** Rotate `v` in place about the unit axis `k` by `ang` radians (Rodrigues). */
+function rotate(v: Float64Array, k: number[], ang: number): void {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  const d = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+  const cx = k[1] * v[2] - k[2] * v[1], cy = k[2] * v[0] - k[0] * v[2], cz = k[0] * v[1] - k[1] * v[0];
+  const x = v[0] * c + cx * s + k[0] * d * (1 - c);
+  const y = v[1] * c + cy * s + k[1] * d * (1 - c);
+  const z = v[2] * c + cz * s + k[2] * d * (1 - c);
+  v[0] = x; v[1] = y; v[2] = z;
+}
+
 function smoothstep(a: number, b: number, x: number): number {
   const t = Math.max(0, Math.min(1, (x - a) / (b - a)));
   return t * t * (3 - 2 * t);
@@ -83,8 +94,12 @@ export class Explorer {
 
   readonly keys = new Set<string>();
   private drag: { x: number; y: number; button: number; shift: boolean } | null = null;
+  /** Surface point (unit vector) grabbed by a left drag in orbit: it stays under the cursor. */
+  private grab: Float64Array | null = null;
   private readonly e = new Float64Array(3);
   private readonly n = new Float64Array(3);
+  private readonly fwd = new Float64Array(3);
+  private readonly fwd2 = new Float64Array(3);
   private readonly up = new THREE.Vector3();
   /** Called when the mode changes. */
   onMode?: (mode: ExploreMode) => void;
@@ -138,11 +153,57 @@ export class Explorer {
   }
 
   private onDown = (e: PointerEvent): void => {
-    this.drag = { x: e.clientX, y: e.clientY, button: e.button, shift: e.shiftKey || e.ctrlKey };
+    const shift = e.shiftKey || e.ctrlKey;
+    this.drag = { x: e.clientX, y: e.clientY, button: e.button, shift };
     this.canvas.setPointerCapture?.(e.pointerId);
     this.flyTarget = null;
     this.landing = false;
+    this.grab = this.mode === 'orbit' && e.button === 0 && !shift ? this.rayToSurface(e.clientX, e.clientY) : null;
   };
+
+  // ------------------------------------------------------------ frames
+
+  /** Unit tangent at `up` pointing along `heading` (0 = north, clockwise). */
+  private forwardOf(up: Float64Array, heading: number, out: Float64Array): Float64Array {
+    tangentFrame(up, this.e, this.n, 0);
+    const c = Math.cos(heading), s = Math.sin(heading);
+    for (let i = 0; i < 3; i++) out[i] = this.n[i] * c + this.e[i] * s;
+    return out;
+  }
+
+  /**
+   * Heading of a tangent vector carried from elsewhere to `up`. Carrying the
+   * direction itself (instead of the angle to north) keeps the view steady over
+   * the poles, where north turns around.
+   */
+  private headingOf(up: Float64Array, v: Float64Array): number {
+    tangentFrame(up, this.e, this.n, 0);
+    const d = v[0] * up[0] + v[1] * up[1] + v[2] * up[2];
+    let x = 0, y = 0;
+    for (let i = 0; i < 3; i++) {
+      const t = v[i] - d * up[i];
+      x += t * this.e[i];
+      y += t * this.n[i];
+    }
+    return Math.atan2(x, y);
+  }
+
+  /** Rotate the orbit view so that the surface point `from` moves to `to` (focus and heading together). */
+  private rotateView(from: Float64Array, to: Float64Array, share = 1): void {
+    const ax = from[1] * to[2] - from[2] * to[1];
+    const ay = from[2] * to[0] - from[0] * to[2];
+    const az = from[0] * to[1] - from[1] * to[0];
+    const sl = Math.hypot(ax, ay, az);
+    if (sl < 1e-12) return;
+    const ang = Math.atan2(sl, from[0] * to[0] + from[1] * to[1] + from[2] * to[2]) * share;
+    const k = [ax / sl, ay / sl, az / sl];
+    const F = this.forwardOf(this.focus, this.heading, this.fwd);
+    rotate(this.focus, k, ang);
+    rotate(F, k, ang);
+    const l = Math.hypot(this.focus[0], this.focus[1], this.focus[2]);
+    for (let i = 0; i < 3; i++) this.focus[i] /= l;
+    this.heading = this.headingOf(this.focus, F);
+  }
 
   private onMove = (e: PointerEvent): void => {
     const d = this.drag;
@@ -160,15 +221,22 @@ export class Explorer {
       this.heading += dx * 0.005;
       this.tiltUser = Math.max(-1.3, Math.min(1.4, this.tiltUser + dy * 0.004));
     } else {
-      const h = this.canvas.clientHeight || 1;
-      const mpp = (2 * this.dist * Math.tan((this.camera.fov * Math.PI) / 360)) / h;
-      this.pan(-dx * mpp, dy * mpp);
+      // Grab the ground: the point under the cursor follows it.
+      const cur = this.grab ? this.rayToSurface(e.clientX, e.clientY) : null;
+      if (this.grab && cur) {
+        this.rotateView(cur, this.grab);
+      } else {
+        const h = this.canvas.clientHeight || 1;
+        const mpp = (2 * this.dist * Math.tan((this.camera.fov * Math.PI) / 360)) / h;
+        this.pan(-dx * mpp, dy * mpp);
+      }
     }
     this.active = true;
   };
 
   private onUp = (e: PointerEvent): void => {
     this.drag = null;
+    this.grab = null;
     this.canvas.releasePointerCapture?.(e.pointerId);
   };
 
@@ -187,7 +255,15 @@ export class Explorer {
       if (next < minD && dy < 0 && this.sampler) {
         this.enterWalk();
       } else {
-        this.dist = Math.max(minD, Math.min(5 * this.radiusM, next));
+        // Zoom toward the point under the cursor, not the centre of the screen.
+        const hit = this.rayToSurface(e.clientX, e.clientY);
+        const clamped = Math.max(minD, Math.min(5 * this.radiusM, next));
+        if (hit) {
+          const share = 1 - clamped / this.dist;
+          if (share > 0) this.rotateView(this.focus.slice(), hit, share);
+          else if (share < 0) this.rotateView(this.focus.slice(), hit, Math.max(-0.5, share));
+        }
+        this.dist = clamped;
       }
     }
     this.active = true;
@@ -200,6 +276,13 @@ export class Explorer {
     if (!hit) return;
     this.flyTo(hit, Math.max(15, this.dist * 0.35), 4);
   };
+
+  /** Fly the orbit camera to look at a surface direction from `dist` metres. */
+  flyToDir(dir: Float64Array, dist: number): void {
+    if (this.mode === 'walk') this.exitWalk();
+    this.landing = false;
+    this.flyTo(new Float64Array(dir), dist, 2.2);
+  }
 
   private flyTo(target: Float64Array, dist: number, rate: number): void {
     const l = Math.hypot(target[0], target[1], target[2]);
@@ -296,6 +379,7 @@ export class Explorer {
 
   private pan(right: number, forward: number): void {
     const R = this.radiusM;
+    const F = this.forwardOf(this.focus, this.heading, this.fwd);
     tangentFrame(this.focus, this.e, this.n, 0);
     const c = Math.cos(this.heading), s = Math.sin(this.heading);
     const fx = this.n[0] * c + this.e[0] * s, fy = this.n[1] * c + this.e[1] * s, fz = this.n[2] * c + this.e[2] * s;
@@ -308,6 +392,7 @@ export class Explorer {
     const z = this.focus[2] + ((rz * right + fz * forward) * k) / R;
     const l = Math.hypot(x, y, z);
     this.focus[0] = x / l; this.focus[1] = y / l; this.focus[2] = z / l;
+    this.heading = this.headingOf(this.focus, F);
   }
 
   /** Advance one frame and place the camera. */
@@ -331,9 +416,7 @@ export class Explorer {
     if (k.has('e')) this.heading += dt * 1.2;
     if (this.flyTarget) {
       const t = 1 - Math.exp(-dt * this.flyRate);
-      for (let i = 0; i < 3; i++) this.focus[i] += (this.flyTarget[i] - this.focus[i]) * t;
-      const l = Math.hypot(this.focus[0], this.focus[1], this.focus[2]);
-      for (let i = 0; i < 3; i++) this.focus[i] /= l;
+      this.rotateView(this.focus.slice(), this.flyTarget, t);
       this.dist *= Math.pow(this.flyDist / this.dist, t);
       const dx = this.focus[0] - this.flyTarget[0], dy = this.focus[1] - this.flyTarget[1], dz = this.focus[2] - this.flyTarget[2];
       if (Math.hypot(dx, dy, dz) * R < 1 && Math.abs(this.dist / this.flyDist - 1) < 0.03) {
@@ -351,7 +434,8 @@ export class Explorer {
     const c = Math.cos(this.heading), sn = Math.sin(this.heading);
     const fx = this.n[0] * c + this.e[0] * sn, fy = this.n[1] * c + this.e[1] * sn, fz = this.n[2] * c + this.e[2] * sn;
     const sr = this.surfaceR(up[0], up[1], up[2], Math.max(1, this.dist * 0.01));
-    const auto = 1.15 * (1 - smoothstep(2500, 450_000, this.dist));
+    // Close to the ground the view leans toward the horizon by itself, gradually.
+    const auto = 1.05 * (1 - smoothstep(1500, 120_000, this.dist));
     const tilt = Math.max(0, Math.min(1.45, auto + this.tiltUser));
     const ct = Math.cos(tilt), st = Math.sin(tilt);
     let px = up[0] * sr + this.dist * (up[0] * ct - fx * st);
@@ -394,11 +478,17 @@ export class Explorer {
     if (f || s) {
       const len = Math.hypot(f, s);
       const step = (speed * dt) / len;
+      // Carry the camera and body directions along (steady across the poles).
+      const F = this.fwd;
+      F[0] = fx; F[1] = fy; F[2] = fz;
+      const Y = this.forwardOf(p, this.yaw, this.fwd2);
       const x = p[0] + ((fx * f + rx * s) * step) / R;
       const y = p[1] + ((fy * f + ry * s) * step) / R;
       const z = p[2] + ((fz * f + rz * s) * step) / R;
       const l = Math.hypot(x, y, z);
       p[0] = x / l; p[1] = y / l; p[2] = z / l;
+      this.camYaw = this.headingOf(p, F);
+      this.yaw = this.headingOf(p, Y);
       target = speed;
       // Face the direction of travel.
       const want = this.camYaw + Math.atan2(s, f);
@@ -464,6 +554,11 @@ export class Explorer {
     this.camera.position.set(cx, cy, cz);
     this.camera.up.copy(up);
     this.camera.lookAt(tx, ty, tz);
+  }
+
+  /** Facing of the player as a tangent vector (for the avatar), pole-safe. */
+  playerForward(out: Float64Array): Float64Array {
+    return this.forwardOf(this.player, this.yaw, out);
   }
 
   /** Direction (unit) of what the observer stands on or looks at. */

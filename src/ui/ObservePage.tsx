@@ -1,7 +1,10 @@
 import { useEffect, useRef } from 'preact/hooks';
 import { formatDate, formatYears, LENSES, type LensId } from '../core/lens';
-import { LAYERS, layerById, type LayerId } from '../render/layers';
+import { RULE_PACKS } from '../core/rules/packs/arcane';
+import { LAYERS, layerById, type LayerDef, type LayerId } from '../render/layers';
 import { controller, ui } from './controller';
+import { openPanel, SidePanel } from './panels/side';
+import { fmtNum } from './widgets';
 
 export function ObservePage() {
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -11,8 +14,9 @@ export function ObservePage() {
     if (canvas.current) controller.attach(canvas.current);
   }, []);
 
+  const orbit = ui.mode.value === 'orbit';
   return (
-    <div class="observe">
+    <div class={`observe${ui.panelOpen.value ? '' : ' side-closed'}`}>
       <canvas
         ref={canvas}
         class="planet"
@@ -20,15 +24,20 @@ export function ObservePage() {
         onPointerUp={(e) => {
           const d = down.current;
           down.current = null;
-          if (e.button === 0 && ui.mode.value === 'orbit' && d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) controller.pick(e.clientX, e.clientY);
+          // A click (not a drag): animals and towns first, then the ground (from above only).
+          if (e.button === 0 && d && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 5) controller.pick(e.clientX, e.clientY, orbit);
         }}
       />
       <TimeBar />
-      {ui.mode.value === 'orbit' && <ControlPanel />}
-      <Inspector />
-      {ui.mode.value === 'orbit' && <Legend />}
+      {orbit && <ControlPanel />}
+      <SidePanel />
       <Hud />
       <Help />
+      {ui.toast.value && (
+        <div class="note-toast panel" role="status">
+          {ui.toast.value}
+        </div>
+      )}
       {ui.status.value === 'generating' && <div class="toast">世界を生成中…</div>}
       {ui.status.value === 'error' && (
         <div class="toast error">
@@ -42,7 +51,9 @@ export function ObservePage() {
 
 function TimeBar() {
   const lens = LENSES.find((l) => l.id === ui.lens.value)!;
-  const time = ui.lens.value === 'present' || ui.lens.value === 'history' ? formatDate(ui.time.value) : formatYears(ui.time.value);
+  const fine = ui.dtYears.value <= 1;
+  const time = fine ? formatDate(ui.time.value) : formatYears(ui.time.value);
+  const s = ui.summary.value;
   return (
     <div class="timebar panel">
       <button class="play" onClick={() => controller.togglePlay()} title={ui.playing.value ? '一時停止' : '再生'} disabled={ui.status.value !== 'ready'}>
@@ -79,9 +90,36 @@ function TimeBar() {
           ))}
         </select>
       </label>
-      <span class="lens-note">{lens.note}</span>
+      {s ? (
+        <div class="vitals">
+          <button class="vital" onClick={() => openPanel('world')} title="生命の段階と現生種">
+            {s.life.stageName} ・ {s.life.species} 種
+          </button>
+          {s.civ.started && (
+            <button class="vital" onClick={() => openPanel('nations')} title="文明の時代・人口・国">
+              {s.civ.eraName}時代 ・ {fmtNum(s.civ.pop)}人 ・ {s.civ.polities}か国{s.civ.wars ? ` ・ 戦争${s.civ.wars}` : ''}
+            </button>
+          )}
+          <span class="vital-plain" title="気温偏差と CO2">
+            {s.climate.dT >= 0 ? '+' : ''}{s.climate.dT.toFixed(1)}℃ ・ {s.climate.regime}
+          </span>
+        </div>
+      ) : (
+        <span class="lens-note">{lens.note}</span>
+      )}
     </div>
   );
+}
+
+const GROUPS: { id: 'nature' | 'people'; name: string }[] = [
+  { id: 'nature', name: '自然' },
+  { id: 'people', name: '生き物と人' },
+];
+
+function visibleLayer(l: LayerDef): boolean {
+  if (l.id === 'mana') return !!ui.world.value?.magic;
+  if (l.id === 'range') return ui.rangeOf.value >= 0;
+  return true;
 }
 
 function ControlPanel() {
@@ -111,9 +149,27 @@ function ControlPanel() {
           ランダム
         </button>
       </div>
+      <label class="row">
+        ルール
+        <select
+          value={RULE_PACKS.find((p) => p.pack.meta.name === w?.packName)?.id ?? ''}
+          onChange={(e) => {
+            const p = RULE_PACKS.find((x) => x.id === (e.target as HTMLSelectElement).value);
+            if (!p) return;
+            ui.packText.value = JSON.stringify(p.pack, null, 2);
+            void controller.generate();
+          }}
+          disabled={ui.status.value === 'generating'}
+        >
+          {!RULE_PACKS.some((p) => p.pack.meta.name === w?.packName) && <option value="">{w?.packName ?? '—'}（編集済み）</option>}
+          {RULE_PACKS.map((p) => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+      </label>
       {w && (
         <p class="muted">
-          {w.packName} ・ 生成 {Math.round(ui.genMs.value)} ms
+          主星 {w.starName} ・ 生成 {Math.round(ui.genMs.value)} ms
         </p>
       )}
       {w && (
@@ -127,67 +183,29 @@ function ControlPanel() {
         </dl>
       )}
 
-      <h2>表示する層</h2>
-      <div class="layer-list" role="radiogroup" aria-label="表示する層">
-        {LAYERS.map((l) => (
-          <button key={l.id} role="radio" aria-checked={ui.layer.value === l.id} class={ui.layer.value === l.id ? 'on' : ''} onClick={() => controller.setLayer(l.id as LayerId)}>
-            {l.name}
-          </button>
-        ))}
-      </div>
+      {GROUPS.map((g) => (
+        <div key={g.id}>
+          <h2>{g.name}</h2>
+          <div class="layer-list" role="radiogroup" aria-label={`表示する層（${g.name}）`}>
+            {LAYERS.filter((l) => (l.group ?? 'nature') === g.id && visibleLayer(l)).map((l) => (
+              <button key={l.id} role="radio" aria-checked={ui.layer.value === l.id} class={ui.layer.value === l.id ? 'on' : ''} onClick={() => controller.setLayer(l.id as LayerId)}>
+                {l.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
 
       <label class="row">
         起伏の誇張 ×{ui.exaggeration.value}
         <input type="range" min={0} max={80} step={5} value={ui.exaggeration.value} onInput={(e) => controller.setExaggeration(Number((e.target as HTMLInputElement).value))} />
       </label>
 
-      <p class="perf muted" title="1 tick の計算時間と描画フレームレート（静止中は再描画しません）">
-        計算 {ui.tickMs.value.toFixed(2)} ms/tick ・ 描画 {ui.fps.value > 0 ? `${ui.fps.value} fps` : '静止'}
-      </p>
-    </div>
-  );
-}
+      <Legend />
 
-function Inspector() {
-  const c = ui.cell.value;
-  const w = ui.world.value;
-  if (!c || !w || ui.selected.value < 0) {
-    return <div class="inspector panel muted">地表をクリックするとセルの詳細を表示します</div>;
-  }
-  const biome = w.biomes[c.biome];
-  const ns = c.latDeg >= 0 ? '北緯' : '南緯';
-  const ew = c.lonDeg >= 0 ? '東経' : '西経';
-  return (
-    <div class="inspector panel">
-      <div class="inspector-head">
-        <span class="swatch" style={{ background: biome?.color }} />
-        <strong>{biome?.name ?? '不明'}</strong>
-        <button class="close" onClick={() => controller.select(-1)} aria-label="閉じる">×</button>
-      </div>
-      <dl>
-        <dt>位置</dt>
-        <dd>{ns} {Math.abs(c.latDeg).toFixed(1)}° ・ {ew} {Math.abs(c.lonDeg).toFixed(1)}°</dd>
-        <dt>{c.heightM >= 0 ? '標高' : '水深'}</dt>
-        <dd>{Math.abs(Math.round(c.heightM)).toLocaleString('ja-JP')} m</dd>
-        <dt>気温</dt>
-        <dd>{c.temperature.toFixed(1)}℃（年平均 {c.tempMean.toFixed(1)}℃ ・ 年較差 {(c.seasonAmp * 2).toFixed(0)}℃）</dd>
-        <dt>湿潤度</dt>
-        <dd><Meter value={c.moisture} /> {(c.moisture * 100).toFixed(0)}%</dd>
-        <dt>大陸度</dt>
-        <dd><Meter value={c.continentality} /> {(c.continentality * 100).toFixed(0)}%</dd>
-        <dt>プレート</dt>
-        <dd>#{c.plate} ・ {c.plateSpeedCmPerYr.toFixed(1)} cm/年{boundaryLabel(c.stress)}</dd>
-        <dt>地殻</dt>
-        <dd>
-          {c.continentalCrust ? '大陸' : '海洋'} {c.crustKm.toFixed(1)} km ・ {formatYears(c.crustAgeMyr * 1e6)}
-        </dd>
-        {c.flow >= 1 && (
-          <>
-            <dt>流域</dt>
-            <dd>{Math.round(c.flow).toLocaleString('ja-JP')} セル分の雨{c.flow >= 10 ? '（大河）' : ''}</dd>
-          </>
-        )}
-      </dl>
+      <p class="perf muted" title="1 tick の計算時間と描画フレームレート（静止中は再描画しません）">
+        計算 {ui.tickMs.value.toFixed(1)} ms/tick ・ 描画 {ui.fps.value > 0 ? `${ui.fps.value} fps` : '静止'}
+      </p>
     </div>
   );
 }
@@ -229,7 +247,7 @@ function Hud() {
         <span title="視点の海面からの高さ">{walk ? state : `高度 ${formatAltitude(v.altitudeM)}`}</span>
         <span title="足もとの標高">{v.groundM >= 0 ? `標高 ${Math.round(v.groundM).toLocaleString('ja-JP')} m` : `水深 ${Math.round(-v.groundM).toLocaleString('ja-JP')} m`}</span>
         {Number.isFinite(v.tempC) && <span title="年平均気温（その高さで）">{v.tempC.toFixed(1)}℃</span>}
-        {near && v.animals > 0 && <span title="周囲にいる動物">動物 {v.animals}</span>}
+        {near && v.animals > 0 && <span title="周囲にいる動物（クリックで図鑑）">動物 {v.animals}</span>}
       </div>
       <div class="hud-row">
         {walk ? (
@@ -259,28 +277,14 @@ function Help() {
   if (v.mode === 'walk') {
     return (
       <div class="help panel">
-        <kbd>W A S D</kbd> 移動 ・ <kbd>Shift</kbd> 走る ・ <kbd>Space</kbd> ジャンプ ・ <kbd>F</kbd> 飛行{v.flying ? <>（<kbd>Space</kbd>/<kbd>C</kbd> 上下）</> : null} ・ ドラッグで見回す ・ ホイールで寄る/引く ・ <kbd>Esc</kbd> 上空へ
+        <kbd>W A S D</kbd> 移動 ・ <kbd>Shift</kbd> 走る ・ <kbd>Space</kbd> ジャンプ ・ <kbd>F</kbd> 飛行{v.flying ? <>（<kbd>Space</kbd>/<kbd>C</kbd> 上下）</> : null} ・ ドラッグで見回す ・ 動物をクリックで図鑑 ・ <kbd>Esc</kbd> 上空へ
       </div>
     );
   }
   return (
     <div class="help panel">
-      ドラッグで移動 ・ 右ドラッグで回転と傾き ・ ホイールで拡大{v.altitudeM < 20_000 ? <> ・ 拡大しきるか <kbd>Enter</kbd> で降り立つ</> : null} ・ ダブルクリックでその地点へ
+      ドラッグで移動 ・ 右ドラッグで回転と傾き ・ ホイールで拡大 ・ クリックで地点・町・動物の詳細{v.altitudeM < 20_000 ? <> ・ <kbd>Enter</kbd> で降り立つ</> : null}
     </div>
-  );
-}
-
-function boundaryLabel(stress: number): string {
-  if (stress > 0.05) return ' ・ 収束境界';
-  if (stress < -0.05) return ' ・ 発散境界';
-  return '';
-}
-
-function Meter({ value }: { value: number }) {
-  return (
-    <span class="meter" aria-hidden="true">
-      <span style={{ width: `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%` }} />
-    </span>
   );
 }
 
@@ -290,9 +294,9 @@ function Legend() {
   if (!w) return null;
   const layer = layerById(ui.layer.value);
   if (layer.fields.some((f) => !controller.fields[f])) return null;
-  const { gradient, stops } = layer.legend(w, controller.fields, 0);
+  const { gradient, stops } = layer.legend(w, controller.fields, ui.seaLevel.value, { range: null, towns: ui.towns.value });
   return (
-    <div class="legend panel">
+    <div class="legend">
       <div class="legend-title">{layer.name}</div>
       {gradient ? (
         <>
